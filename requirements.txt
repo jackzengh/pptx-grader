@@ -1,0 +1,13 @@
+# Python deps for the PowerPoint grader.
+anthropic==0.111.0          # calls the grading model
+python-pptx==1.0.2          # reads slide geometry/text from the .pptx XML
+PyYAML==6.0.3               # loads the rubric YAML
+markitdown[pptx]==0.1.6     # extracts each slide's text for content QA
+
+# rubric — the weighted-criteria scorer. Installed from a local checkout:
+#   pip install -e ~/ML/rubric
+# (no PyPI pin; it's a local editable install.)
+
+# System deps for rendering slides to images (NOT pip-installable — install separately):
+#   LibreOffice (soffice):  brew install --cask libreoffice
+#   Poppler (pdftoppm):     brew install poppler

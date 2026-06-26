@@ -1,0 +1,222 @@
+id: 7f3c1d28-9a4b-4e6f-8c12-5d0a9b3e7f44-evaluation
+# Rubric design notes:
+# Every criterion is BINARY (pass/fail) and rule-like: it names an explicit,
+# checkable threshold so any judge model reproduces the same verdict without
+# inferring intent. Tolerances are stated in the units the deck actually exposes
+# (EMUs / inches for geometry, points for type, hex for color), all of which are
+# directly extractable from the .pptx XML (see check_layout.py). A criterion
+# passes only if it holds on EVERY applicable slide unless stated otherwise;
+# a single violating slide fails the criterion.
+# Reference grid (assume 13.333 in x 7.5 in / 16:9 slide unless deck declares otherwise):
+#   - 1 inch = 914400 EMU. "Align" tolerance default: 0.05 in (45720 EMU).
+sections:
+  - id: layout-and-alignment
+    title: Layout And Alignment
+    criteria:
+      - id: layout-and-alignment-left-margin-consistency
+        weight: 8
+        requirement: >-
+          The left edge (x-offset) of every primary element (title, body block,
+          chart, table, footnote, page number) on a slide rounds to one of at most
+          2 distinct left-edge values, and the dominant left-edge value is identical
+          (within 0.05 in / 45720 EMU) across all content slides. PASS if at most 1
+          slide deviates; FAIL if 2 or more slides use a left edge differing by more
+          than 0.05 in from the deck's dominant value.
+      - id: layout-and-alignment-outer-margin-frame
+        weight: 6
+        requirement: >-
+          On every slide, no shape's bounding box extends outside the slide
+          boundaries (x >= 0, y >= 0, x+width <= slide width, y+height <= slide
+          height), and a reserved margin of at least 0.3 in (274320 EMU) is kept on
+          all four edges (no shape's bounding box enters the outer 0.3 in band)
+          except intentional full-bleed background images that span the entire slide.
+          FAIL if any shape bleeds off-slide or any non-background shape intrudes
+          into the 0.3 in margin band.
+      - id: layout-and-alignment-no-overlap-or-collision
+        weight: 8
+        requirement: >-
+          No two non-background content shapes have bounding boxes whose
+          intersection area exceeds 2% of the smaller shape's area. (Background
+          shapes = full-slide fills/images behind content are exempt.) FAIL if any
+          pair of content shapes overlaps by more than 2% of the smaller box area.
+      - id: layout-and-alignment-edge-and-grid-alignment
+        weight: 6
+        requirement: >-
+          In any multi-column or multi-panel layout (2+ peer boxes sharing a row),
+          the peer boxes have equal widths (max width minus min width <= 0.05 in)
+          and equal top y-offsets (max top minus min top <= 0.05 in). FAIL if any
+          such peer group differs in width or top by more than 0.05 in.
+      - id: layout-and-alignment-consistent-gutters
+        weight: 5
+        requirement: >-
+          For any row of 3+ horizontally adjacent peer boxes, the horizontal gaps
+          between consecutive boxes are equal within 0.05 in (max gap minus min gap
+          <= 0.05 in); likewise for columns of 3+ vertically adjacent peer boxes.
+          FAIL if any such gap series varies by more than 0.05 in.
+      - id: layout-and-alignment-element-boxing
+        weight: 6
+        requirement: >-
+          Every chart and every table on a data slide has a title/caption text box
+          whose bounding box is within 0.5 in (457200 EMU) of that chart/table (top
+          edge of chart within 0.5 in below the caption's bottom, and horizontally
+          overlapping it). FAIL if any chart or table on a slide has no caption
+          within 0.5 in.
+      - id: layout-and-alignment-vertical-rhythm
+        weight: 3
+        requirement: >-
+          The slide title text box has the same top y-offset (within 0.1 in /
+          91440 EMU) on every content slide, and the footer/page-number band has the
+          same top y-offset (within 0.1 in) on every slide that contains one. FAIL
+          if title top or footer top varies by more than 0.1 in across slides.
+      - id: layout-and-alignment-disorder-penalty
+        weight: -15
+        requirement: >-
+          Apply this penalty if ANY of the following is true on ANY slide: a shape
+          bleeds off-slide (violates outer-margin-frame), two content shapes overlap
+          by more than 2% (violates no-overlap), or 2+ slides have left edges
+          differing by more than 0.05 in (violates left-margin-consistency). This is
+          a binary penalty: applied once in full if any condition is met, otherwise 0.
+  - id: typography
+    title: Typography
+    criteria:
+      - id: typography-single-font-family
+        weight: 6
+        requirement: >-
+          Across all runs in the deck, at most 2 distinct font-family names appear
+          (one body face, one optional heading face). Theme default placeholder
+          fonts count toward this. FAIL if 3 or more distinct font families are used
+          anywhere in the deck's runs.
+      - id: typography-size-hierarchy
+        weight: 7
+        requirement: >-
+          Font sizes form a strict descending hierarchy: every slide title run is
+          larger (by >= 4 pt) than every body run on the same slide, and every body
+          run is larger (by >= 2 pt) than every footnote/source/page-number run on
+          that slide. FAIL if on any slide a title is not at least 4 pt larger than
+          its body, or a body run is not at least 2 pt larger than its footnote runs.
+      - id: typography-consistent-level-sizes
+        weight: 4
+        requirement: >-
+          All runs at the same logical level use the same point size deck-wide:
+          title runs share one size (within 0 pt tolerance), body runs share one
+          size, footnote runs share one size. At most 1 deviating slide is allowed.
+          FAIL if 2 or more slides use a different size for the same logical level.
+      - id: typography-text-fits-its-box
+        weight: 6
+        requirement: >-
+          No text box has autofit set to "shrink text on overflow"
+          (normAutofit with fontScale < 100000), and no text box is in overflow
+          (estimated rendered text height <= box height given its font size and
+          width). FAIL if any text box uses shrink-to-fit scaling below 100% or has
+          estimated text height exceeding its box height.
+      - id: typography-in-box-alignment
+        weight: 4
+        requirement: >-
+          Body and label text boxes use left alignment (algn="l" or default), and
+          every numeric table column uses right or decimal alignment (algn="r").
+          FAIL if any body/label box is center/right justified without cause, or any
+          all-numeric table column is left/center aligned.
+      - id: typography-capitalization-consistency
+        weight: 3
+        requirement: >-
+          All slide-title strings follow one detectable case convention deck-wide:
+          either every title is sentence case (only first word + proper nouns
+          capitalized) OR every title is title case (major words capitalized),
+          consistently. FAIL if titles mix sentence case and title case across
+          slides (more than 1 outlier).
+      - id: typography-inconsistency-penalty
+        weight: -12
+        requirement: >-
+          Apply this penalty if ANY is true: 3+ distinct font families appear, OR
+          any text box uses shrink-to-fit below 100% / is in overflow, OR 2+ slides
+          use a different size for the same logical level. Binary: applied once in
+          full if any condition is met, otherwise 0.
+  - id: color-and-branding
+    title: Color And Branding
+    criteria:
+      - id: color-and-branding-limited-palette
+        weight: 6
+        requirement: >-
+          The set of distinct fill and font hex colors used across the deck
+          (excluding pure black 000000, pure white FFFFFF, and grayscale values)
+          contains at most 6 distinct accent/brand hues. FAIL if 7 or more distinct
+          non-neutral colors are used deck-wide.
+      - id: color-and-branding-consistent-chart-styling
+        weight: 6
+        requirement: >-
+          Across all charts, the same data-series name maps to the same series hex
+          color every time it appears, and all charts of the same type share
+          identical gridline color and weight. FAIL if any series name uses 2+
+          different colors across charts, or comparable charts use different
+          gridline styling.
+      - id: color-and-branding-contrast-legibility
+        weight: 5
+        requirement: >-
+          Every text run's color against its immediate background fill has a WCAG
+          contrast ratio >= 4.5:1 (computed from the two hex values). FAIL if any
+          text run has a contrast ratio below 4.5:1 against its background.
+      - id: color-and-branding-semantic-color-consistency
+        weight: 3
+        requirement: >-
+          If any conditional/semantic coloring is used (e.g. a red applied to
+          negative values), the same hex is applied to every instance of that
+          meaning and never to the opposite meaning. FAIL if a semantic color
+          (red for negative, green for positive, or a fixed subject-company accent)
+          is applied inconsistently to its meaning anywhere it recurs.
+      - id: color-and-branding-no-default-theme-penalty
+        weight: -10
+        requirement: >-
+          Apply this penalty if ANY is true: 7+ distinct non-neutral colors are
+          used, OR any text run has contrast below 4.5:1, OR the same chart series
+          name uses 2+ different colors across charts. Binary: applied once in full
+          if any condition is met, otherwise 0.
+  - id: content-and-ib-conventions
+    title: Content And IB Conventions
+    criteria:
+      - id: content-and-ib-conventions-action-titles
+        weight: 8
+        requirement: >-
+          Every content slide's title string contains a complete clause with a verb
+          asserting a claim (e.g. "imply", "is", "drives", "grew") and is NOT a bare
+          noun-phrase topic label (e.g. "Trading Multiples", "Overview", "Market
+          Landscape"). Heuristic: title has >= 5 words AND contains at least one
+          finite verb. FAIL if any content slide title is a bare noun phrase or has
+          fewer than 5 words with no verb.
+      - id: content-and-ib-conventions-source-footnotes
+        weight: 7
+        requirement: >-
+          Every slide containing a chart, table, or numeric data point has at least
+          one text box whose content begins with or contains a source marker
+          ("Source:", "Note:", or a citation). FAIL if any data-bearing slide has no
+          source/note text box.
+      - id: content-and-ib-conventions-page-and-footer
+        weight: 4
+        requirement: >-
+          A page-number text box is present on every content slide (excluding an
+          optional title/cover slide), and its string content increments
+          monotonically. FAIL if any content slide lacks a page number or numbers
+          are missing/non-monotonic.
+      - id: content-and-ib-conventions-number-formatting
+        weight: 5
+        requirement: >-
+          The same metric type uses one consistent format deck-wide: a fixed decimal
+          count per metric (e.g. all multiples shown to 1 decimal as "12.3x"), one
+          currency scale per metric ($M or $B, not mixed for the same metric), and a
+          consistent unit symbol. FAIL if the same metric appears with different
+          decimal counts, currency scale, or unit symbol across slides or within a
+          table.
+      - id: content-and-ib-conventions-one-message-per-slide
+        weight: 4
+        requirement: >-
+          Each content slide has exactly one title text box (one headline claim),
+          and the slide's body shapes relate to that single title without a second
+          competing headline-level text box. FAIL if any slide has two or more
+          title-level headlines competing as separate messages.
+      - id: content-and-ib-conventions-convention-gap-penalty
+        weight: -12
+        requirement: >-
+          Apply this penalty if ANY is true: a data-bearing slide lacks a
+          source/note box, OR any content slide title is a bare noun phrase
+          (< 5 words, no verb), OR the same metric appears with inconsistent
+          decimals/currency-scale/units. Binary: applied once in full if any
+          condition is met, otherwise 0.
