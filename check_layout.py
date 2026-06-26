@@ -2,13 +2,15 @@
 """
 check_layout.py - compact geometry checker for PowerPoint decks.
 
-This module focuses on three deterministic checks:
-  1) alignment precision (near-miss edge alignment)
-  2) collisions (bounding-box intersections)
-  3) frame adherence (content outside the inner margin frame)
+This module focuses on two deterministic checks:
+  1) collisions (bounding-box intersections)
+  2) frame adherence (content outside the inner margin frame)
 
-It intentionally drops the old YAML rule engine and ASCII map renderer so the
-core geometry logic stays small and maintainable.
+Shapes named "background" (case-insensitive) are exempt from both checks.
+
+All geometry is stored and reported in INCHES. PowerPoint stores positions in
+EMU (English Metric Units); we convert once at read time and work in inches
+everywhere else.
 """
 
 import os
@@ -27,39 +29,31 @@ except ImportError:
 
 EMU_PER_INCH = 914400
 DEFAULT_MARGIN_IN = 0.5
-DEFAULT_ALIGNMENT_TOL_PX = 3
-DEFAULT_FRAME_TOL_PX = 2
-DEFAULT_COLLISION_TOL_PX = 1
-DEFAULT_PX_DPI = 96
+DEFAULT_FRAME_TOL_IN = 0.02
+DEFAULT_COLLISION_TOL_IN = 0.01
 
 
-def emu_to_in(v: Optional[int]) -> Optional[float]:
+def _emu_to_in(v: Optional[int]) -> Optional[float]:
+    """Convert a raw EMU measurement to inches, preserving None."""
     return None if v is None else round(v / EMU_PER_INCH, 3)
-
-
-def in_to_emu(v: float) -> int:
-    return round(v * EMU_PER_INCH)
-
-
-def px_to_emu(px: float, dpi: int = DEFAULT_PX_DPI) -> int:
-    return round((px / dpi) * EMU_PER_INCH)
 
 
 @dataclass
 class Box:
-    left: Optional[int]
-    top: Optional[int]
-    width: Optional[int]
-    height: Optional[int]
+    """A rectangle in inches. Any field may be None for unresolved placeholders."""
+    left: Optional[float]
+    top: Optional[float]
+    width: Optional[float]
+    height: Optional[float]
 
     @property
-    def right(self) -> Optional[int]:
+    def right(self) -> Optional[float]:
         if self.left is None or self.width is None:
             return None
         return self.left + self.width
 
     @property
-    def bottom(self) -> Optional[int]:
+    def bottom(self) -> Optional[float]:
         if self.top is None or self.height is None:
             return None
         return self.top + self.height
@@ -78,15 +72,15 @@ class ResolvedShape:
     ph_idx: Optional[int] = None
     has_text: bool = False
     rotation: float = 0.0
-    geometry_inherited: bool = False
+    text_style: dict = field(default_factory=dict)
 
 
 @dataclass
 class SlideModel:
     index: int
     layout_name: str
-    slide_w: int
-    slide_h: int
+    slide_w: float
+    slide_h: float
     shapes: list = field(default_factory=list)
 
 
@@ -137,7 +131,13 @@ def shape_kind(shape) -> str:
 
 
 def _local_box(shape) -> Box:
-    return Box(shape.left, shape.top, shape.width, shape.height)
+    """Build a Box (in inches) from the shape's own stored geometry."""
+    return Box(
+        _emu_to_in(shape.left),
+        _emu_to_in(shape.top),
+        _emu_to_in(shape.width),
+        _emu_to_in(shape.height),
+    )
 
 
 def _match_placeholder(ph_type, ph_idx, candidates, by="idx_then_type"):
@@ -151,24 +151,23 @@ def _match_placeholder(ph_type, ph_idx, candidates, by="idx_then_type"):
     return None
 
 
-def resolve_geometry(shape, layout, master) -> tuple:
+def resolve_geometry(shape, layout, master) -> Box:
+    """Resolve a shape's box in inches, walking slide -> layout -> master for
+    placeholders that leave geometry unset on the slide."""
     box = _local_box(shape)
-    inherited = False
     if box.is_resolved() or not getattr(shape, "is_placeholder", False):
-        return box, inherited
+        return box
 
     pf = shape.placeholder_format
     ph_type = ph_type_str(pf)
     ph_idx = pf.idx
 
     def fill_from(src_shape):
-        nonlocal inherited
         for attr in ("left", "top", "width", "height"):
             if getattr(box, attr) is None:
                 val = getattr(src_shape, attr)
                 if val is not None:
-                    setattr(box, attr, val)
-                    inherited = True
+                    setattr(box, attr, _emu_to_in(val))
 
     lay_ph = _match_placeholder(ph_type, ph_idx, list(layout.placeholders), by="idx_then_type")
     if lay_ph is not None and not box.is_resolved():
@@ -177,15 +176,15 @@ def resolve_geometry(shape, layout, master) -> tuple:
         mas_ph = _match_placeholder(ph_type, ph_idx, list(master.placeholders), by="type")
         if mas_ph is not None:
             fill_from(mas_ph)
-    return box, inherited
+    return box
 
 
-def to_resolved_shape(shape, source, layout, master) -> ResolvedShape:
+def to_resolved_shape(shape, source, layout, master, box=None) -> ResolvedShape:
+    """Turn a raw python-pptx shape into a ResolvedShape (inches). Pass an
+    explicit `box` to override geometry (used when flattening groups)."""
     kind = shape_kind(shape)
-    if source == "slide":
-        box, inherited = resolve_geometry(shape, layout, master)
-    else:
-        box, inherited = _local_box(shape), False
+    if box is None:
+        box = resolve_geometry(shape, layout, master) if source == "slide" else _local_box(shape)
     pf = shape.placeholder_format if getattr(shape, "is_placeholder", False) else None
     has_text = getattr(shape, "has_text_frame", False) and bool(shape.text_frame.text.strip())
     try:
@@ -201,8 +200,53 @@ def to_resolved_shape(shape, source, layout, master) -> ResolvedShape:
         ph_idx=pf.idx if pf is not None else None,
         has_text=has_text,
         rotation=rot,
-        geometry_inherited=inherited,
+        text_style=_shape_text_style(shape),
     )
+
+
+def flatten_group(group, source, layout, master) -> list:
+    """Recurse into a group, returning its leaf shapes as ResolvedShapes whose
+    boxes are mapped onto the slide via the group's coordinate transform.
+
+    A group's <a:xfrm> defines its position/extent on the slide (off/ext) and
+    the child coordinate space (chOff/chExt). Each child is mapped:
+        scale  = group_extent / child_extent
+        on_slide = group_off + (child_coord - child_off) * scale
+    """
+    out = []
+    try:
+        g_left, g_top = group.left, group.top
+        g_w, g_h = group.width, group.height
+        xfrm = group._element.grpSpPr.xfrm
+        ch_off, ch_ext = xfrm.chOff, xfrm.chExt
+        ch_x, ch_y = ch_off.x, ch_off.y
+        ch_w, ch_h = ch_ext.cx, ch_ext.cy
+    except (AttributeError, TypeError):
+        return out
+    if not ch_w or not ch_h or g_w is None or g_h is None:
+        return out
+
+    scale_x = g_w / ch_w
+    scale_y = g_h / ch_h
+
+    def map_box(shape):
+        if shape.left is None or shape.top is None or shape.width is None or shape.height is None:
+            return None
+        left = g_left + (shape.left - ch_x) * scale_x
+        top = g_top + (shape.top - ch_y) * scale_y
+        return Box(
+            _emu_to_in(left),
+            _emu_to_in(top),
+            _emu_to_in(shape.width * scale_x),
+            _emu_to_in(shape.height * scale_y),
+        )
+
+    for child in group.shapes:
+        if shape_kind(child) == "group":
+            out.extend(flatten_group(child, source, layout, master))
+            continue
+        out.append(to_resolved_shape(child, source, layout, master, box=map_box(child)))
+    return out
 
 
 def collect_inherited_pictures(slide, layout, master) -> list:
@@ -223,13 +267,18 @@ def collect_inherited_pictures(slide, layout, master) -> list:
 
 def build_slide_models(prs, slide_filter=None) -> list:
     models = []
-    w, h = prs.slide_width, prs.slide_height
+    w, h = _emu_to_in(prs.slide_width), _emu_to_in(prs.slide_height)
     for i, slide in enumerate(prs.slides, start=1):
         if slide_filter is not None and i not in slide_filter:
             continue
         layout = slide.slide_layout
         master = layout.slide_master
-        shapes = [to_resolved_shape(sh, "slide", layout, master) for sh in slide.shapes]
+        shapes = []
+        for sh in slide.shapes:
+            if shape_kind(sh) == "group":
+                shapes.extend(flatten_group(sh, "slide", layout, master))
+            else:
+                shapes.append(to_resolved_shape(sh, "slide", layout, master))
         seen = {(s.name, s.box.left, s.box.top) for s in shapes}
         for ps in collect_inherited_pictures(slide, layout, master):
             key = (ps.name, ps.box.left, ps.box.top)
@@ -282,22 +331,21 @@ def _shape_text_style(shape) -> dict:
     }
 
 
-def _raw_shapes_by_name(slide):
-    out = {}
-    for sh in slide.shapes:
-        out.setdefault(sh.name, sh)
-    return out
+def _is_background(shape: ResolvedShape) -> bool:
+    """Shapes the author named as a background are exempt from geometry checks
+    (e.g. a full-card or full-slide backing rectangle that content sits on top of)."""
+    return "background" in (shape.name or "").lower()
 
 
 def _iter_resolved_content_shapes(model: SlideModel):
     for sh in model.shapes:
-        if sh.kind == "group":
+        if _is_background(sh):
             continue
         if sh.box.is_resolved():
             yield sh
 
 
-def check_collisions(model: SlideModel, tol_emu: int) -> list:
+def check_collisions(model: SlideModel, tol_in: float) -> list:
     cid = "collisions"
     shapes = list(_iter_resolved_content_shapes(model))
     results = []
@@ -306,12 +354,12 @@ def check_collisions(model: SlideModel, tol_emu: int) -> list:
             a, b = shapes[i], shapes[j]
             ox = min(a.box.right, b.box.right) - max(a.box.left, b.box.left)
             oy = min(a.box.bottom, b.box.bottom) - max(a.box.top, b.box.top)
-            if ox > tol_emu and oy > tol_emu:
+            if ox > tol_in and oy > tol_in:
                 results.append(CheckResult(
                     cid,
                     model.index,
                     "fail",
-                    f"{a.name} overlaps {b.name} by {emu_to_in(ox)}in x {emu_to_in(oy)}in",
+                    f"{a.name} overlaps {b.name} by {round(ox, 3)}in x {round(oy, 3)}in",
                     [a.name, b.name],
                 ))
     if not results:
@@ -319,26 +367,26 @@ def check_collisions(model: SlideModel, tol_emu: int) -> list:
     return results
 
 
-def check_frame_adherence(model: SlideModel, margin_emu: int, tol_emu: int) -> list:
+def check_frame_adherence(model: SlideModel, margin_in: float, tol_in: float) -> list:
     cid = "frame_adherence"
-    L = margin_emu
-    T = margin_emu
-    R = model.slide_w - margin_emu
-    B = model.slide_h - margin_emu
+    L = margin_in
+    T = margin_in
+    R = model.slide_w - margin_in
+    B = model.slide_h - margin_in
     results = []
     checked = 0
     for sh in _iter_resolved_content_shapes(model):
         checked += 1
         b = sh.box
         violations = []
-        if b.left < L - tol_emu:
-            violations.append(f"left by {emu_to_in(L - b.left)}in")
-        if b.top < T - tol_emu:
-            violations.append(f"top by {emu_to_in(T - b.top)}in")
-        if b.right > R + tol_emu:
-            violations.append(f"right by {emu_to_in(b.right - R)}in")
-        if b.bottom > B + tol_emu:
-            violations.append(f"bottom by {emu_to_in(b.bottom - B)}in")
+        if b.left < L - tol_in:
+            violations.append(f"left by {round(L - b.left, 3)}in")
+        if b.top < T - tol_in:
+            violations.append(f"top by {round(T - b.top, 3)}in")
+        if b.right > R + tol_in:
+            violations.append(f"right by {round(b.right - R, 3)}in")
+        if b.bottom > B + tol_in:
+            violations.append(f"bottom by {round(b.bottom - B, 3)}in")
         if violations:
             results.append(CheckResult(
                 cid,
@@ -352,55 +400,17 @@ def check_frame_adherence(model: SlideModel, margin_emu: int, tol_emu: int) -> l
     return results
 
 
-def check_alignment_precision(model: SlideModel, tol_emu: int, near_window_emu: Optional[int] = None) -> list:
-    cid = "alignment_precision"
-    near = near_window_emu if near_window_emu is not None else max(tol_emu * 6, in_to_emu(0.12))
-    shapes = list(_iter_resolved_content_shapes(model))
-    if len(shapes) < 2:
-        return [CheckResult(cid, model.index, "skip", "not enough resolved shapes")]
-
-    edge_getters = {
-        "left": lambda s: s.box.left,
-        "right": lambda s: s.box.right,
-        "top": lambda s: s.box.top,
-        "bottom": lambda s: s.box.bottom,
-    }
-    failures = []
-    for edge, get_val in edge_getters.items():
-        vals = sorted([(s.name, get_val(s)) for s in shapes], key=lambda x: x[1])
-        for (n1, v1), (n2, v2) in zip(vals, vals[1:]):
-            delta = v2 - v1
-            if tol_emu < delta <= near:
-                failures.append(CheckResult(
-                    cid,
-                    model.index,
-                    "fail",
-                    f"near-miss {edge} alignment: {n1} vs {n2} (delta {emu_to_in(delta)}in, tol {emu_to_in(tol_emu)}in)",
-                    [n1, n2],
-                ))
-    if failures:
-        return failures
-    return [CheckResult(cid, model.index, "pass", "no near-miss edge alignment issues")]
-
-
 def run_checks(
     models: list,
     *,
     margin_in: float = DEFAULT_MARGIN_IN,
-    alignment_tol_px: int = DEFAULT_ALIGNMENT_TOL_PX,
-    frame_tol_px: int = DEFAULT_FRAME_TOL_PX,
-    collision_tol_px: int = DEFAULT_COLLISION_TOL_PX,
-    px_dpi: int = DEFAULT_PX_DPI,
+    frame_tol_in: float = DEFAULT_FRAME_TOL_IN,
+    collision_tol_in: float = DEFAULT_COLLISION_TOL_IN,
 ) -> list:
-    margin_emu = in_to_emu(margin_in)
-    alignment_tol_emu = px_to_emu(alignment_tol_px, px_dpi)
-    frame_tol_emu = px_to_emu(frame_tol_px, px_dpi)
-    collision_tol_emu = px_to_emu(collision_tol_px, px_dpi)
     out = []
     for m in models:
-        out.extend(check_alignment_precision(m, alignment_tol_emu))
-        out.extend(check_collisions(m, collision_tol_emu))
-        out.extend(check_frame_adherence(m, margin_emu, frame_tol_emu))
+        out.extend(check_collisions(m, collision_tol_in))
+        out.extend(check_frame_adherence(m, margin_in, frame_tol_in))
     return out
 
 
@@ -408,21 +418,16 @@ def audit_presentation(
     pptx_path: str,
     *,
     margin_in: float = DEFAULT_MARGIN_IN,
-    alignment_tol_px: int = DEFAULT_ALIGNMENT_TOL_PX,
-    frame_tol_px: int = DEFAULT_FRAME_TOL_PX,
-    collision_tol_px: int = DEFAULT_COLLISION_TOL_PX,
-    px_dpi: int = DEFAULT_PX_DPI,
+    frame_tol_in: float = DEFAULT_FRAME_TOL_IN,
+    collision_tol_in: float = DEFAULT_COLLISION_TOL_IN,
 ) -> tuple:
     prs = Presentation(pptx_path)
     models = build_slide_models(prs, None)
-    slides = list(prs.slides)
     results = run_checks(
         models,
         margin_in=margin_in,
-        alignment_tol_px=alignment_tol_px,
-        frame_tol_px=frame_tol_px,
-        collision_tol_px=collision_tol_px,
-        px_dpi=px_dpi,
+        frame_tol_in=frame_tol_in,
+        collision_tol_in=collision_tol_in,
     )
 
     fails_by_slide = {}
@@ -434,35 +439,32 @@ def audit_presentation(
             "collisions": [],
             "frame_violations": [],
         })
-        if r.check_id == "alignment_precision":
-            slot["alignment_issues"].append(r.message)
-        elif r.check_id == "collisions":
+        if r.check_id == "collisions":
             slot["collisions"].append(r.message)
         elif r.check_id == "frame_adherence":
             slot["frame_violations"].append(r.message)
 
+    slide_w_in = _emu_to_in(prs.slide_width)
+    slide_h_in = _emu_to_in(prs.slide_height)
     deck = {
         "file": os.path.basename(pptx_path),
         "slide_count": len(models),
-        "slide_size_in": [emu_to_in(prs.slide_width), emu_to_in(prs.slide_height)],
+        "slide_size_in": [slide_w_in, slide_h_in],
         "frame_in": {
             "margin": margin_in,
             "left": margin_in,
             "top": margin_in,
-            "right_line": emu_to_in(prs.slide_width - in_to_emu(margin_in)),
-            "bottom_line": emu_to_in(prs.slide_height - in_to_emu(margin_in)),
+            "right_line": round(slide_w_in - margin_in, 3),
+            "bottom_line": round(slide_h_in - margin_in, 3),
         },
-        "tolerances_px": {
-            "alignment": alignment_tol_px,
-            "collision": collision_tol_px,
-            "frame": frame_tol_px,
-            "dpi_basis": px_dpi,
+        "tolerances_in": {
+            "collision": collision_tol_in,
+            "frame": frame_tol_in,
         },
         "slides": [],
     }
 
-    for model, slide in zip(models, slides):
-        raw = _raw_shapes_by_name(slide)
+    for model in models:
         shapes_out = []
         for rs in model.shapes:
             entry = {
@@ -474,18 +476,17 @@ def audit_presentation(
             }
             if rs.box.is_resolved():
                 entry["pos_in"] = {
-                    "left": emu_to_in(rs.box.left),
-                    "top": emu_to_in(rs.box.top),
-                    "width": emu_to_in(rs.box.width),
-                    "height": emu_to_in(rs.box.height),
-                    "right": emu_to_in(rs.box.right),
-                    "bottom": emu_to_in(rs.box.bottom),
+                    "left": rs.box.left,
+                    "top": rs.box.top,
+                    "width": rs.box.width,
+                    "height": rs.box.height,
+                    "right": round(rs.box.right, 3),
+                    "bottom": round(rs.box.bottom, 3),
                 }
             else:
                 entry["pos_in"] = None
-            sh = raw.get(rs.name)
-            if sh is not None:
-                entry.update(_shape_text_style(sh))
+            if rs.text_style:
+                entry.update(rs.text_style)
             shapes_out.append(entry)
 
         flags = fails_by_slide.get(model.index, {

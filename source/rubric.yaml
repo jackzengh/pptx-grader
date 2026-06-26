@@ -13,6 +13,7 @@ sections:
   - id: layout-and-alignment
     title: Layout And Alignment
     criteria:
+      # left margin consistency
       - id: layout-and-alignment-left-margin-consistency
         weight: 8
         requirement: >-
@@ -22,6 +23,7 @@ sections:
           (within 0.05 in / 45720 EMU) across all content slides. PASS if at most 1
           slide deviates; FAIL if 2 or more slides use a left edge differing by more
           than 0.05 in from the deck's dominant value.
+      # outer margin frame
       - id: layout-and-alignment-outer-margin-frame
         weight: 6
         requirement: >-
@@ -32,13 +34,16 @@ sections:
           except intentional full-bleed background images that span the entire slide.
           FAIL if any shape bleeds off-slide or any non-background shape intrudes
           into the 0.3 in margin band.
+      # no overlap or collision
       - id: layout-and-alignment-no-overlap-or-collision
         weight: 8
         requirement: >-
-          No two non-background content shapes have bounding boxes whose
-          intersection area exceeds 2% of the smaller shape's area. (Background
-          shapes = full-slide fills/images behind content are exempt.) FAIL if any
-          pair of content shapes overlaps by more than 2% of the smaller box area.
+          No two non-background content shapes may overlap: the intersection area of
+          their bounding boxes must be exactly 0 (touching edges is allowed, but any
+          positive-area overlap is not). Background shapes (full-slide fills/images
+          behind content) are exempt. FAIL if any pair of non-background content
+          shapes has intersection area > 0.
+      # columns/panels look evenly sized and top-aligned
       - id: layout-and-alignment-edge-and-grid-alignment
         weight: 6
         requirement: >-
@@ -46,6 +51,7 @@ sections:
           the peer boxes have equal widths (max width minus min width <= 0.05 in)
           and equal top y-offsets (max top minus min top <= 0.05 in). FAIL if any
           such peer group differs in width or top by more than 0.05 in.
+      # checking for consistent gutters
       - id: layout-and-alignment-consistent-gutters
         weight: 5
         requirement: >-
@@ -53,6 +59,7 @@ sections:
           between consecutive boxes are equal within 0.05 in (max gap minus min gap
           <= 0.05 in); likewise for columns of 3+ vertically adjacent peer boxes.
           FAIL if any such gap series varies by more than 0.05 in.
+      # every chart and table has a caption
       - id: layout-and-alignment-element-boxing
         weight: 6
         requirement: >-
@@ -61,6 +68,7 @@ sections:
           edge of chart within 0.5 in below the caption's bottom, and horizontally
           overlapping it). FAIL if any chart or table on a slide has no caption
           within 0.5 in.
+      # title and footer/page-number have consistent offsets from the margins
       - id: layout-and-alignment-vertical-rhythm
         weight: 3
         requirement: >-
@@ -68,17 +76,19 @@ sections:
           91440 EMU) on every content slide, and the footer/page-number band has the
           same top y-offset (within 0.1 in) on every slide that contains one. FAIL
           if title top or footer top varies by more than 0.1 in across slides.
+      # disorder penalty
       - id: layout-and-alignment-disorder-penalty
         weight: -15
         requirement: >-
           Apply this penalty if ANY of the following is true on ANY slide: a shape
-          bleeds off-slide (violates outer-margin-frame), two content shapes overlap
-          by more than 2% (violates no-overlap), or 2+ slides have left edges
+          bleeds off-slide (violates outer-margin-frame), two non-background content
+          shapes overlap at all (violates no-overlap), or 2+ slides have left edges
           differing by more than 0.05 in (violates left-margin-consistency). This is
           a binary penalty: applied once in full if any condition is met, otherwise 0.
   - id: typography
     title: Typography
     criteria:
+      # single font family with max 2 distinct font families
       - id: typography-single-font-family
         weight: 6
         requirement: >-
@@ -86,6 +96,7 @@ sections:
           (one body face, one optional heading face). Theme default placeholder
           fonts count toward this. FAIL if 3 or more distinct font families are used
           anywhere in the deck's runs.
+      # type size hierarchy
       - id: typography-size-hierarchy
         weight: 7
         requirement: >-
@@ -94,6 +105,7 @@ sections:
           run is larger (by >= 2 pt) than every footnote/source/page-number run on
           that slide. FAIL if on any slide a title is not at least 4 pt larger than
           its body, or a body run is not at least 2 pt larger than its footnote runs.
+      # consistent level sizes
       - id: typography-consistent-level-sizes
         weight: 4
         requirement: >-
@@ -101,6 +113,7 @@ sections:
           title runs share one size (within 0 pt tolerance), body runs share one
           size, footnote runs share one size. At most 1 deviating slide is allowed.
           FAIL if 2 or more slides use a different size for the same logical level.
+      # text fits its box its given
       - id: typography-text-fits-its-box
         weight: 6
         requirement: >-
@@ -109,6 +122,7 @@ sections:
           (estimated rendered text height <= box height given its font size and
           width). FAIL if any text box uses shrink-to-fit scaling below 100% or has
           estimated text height exceeding its box height.
+      # text in the same box aligns the same way
       - id: typography-in-box-alignment
         weight: 4
         requirement: >-
@@ -116,6 +130,7 @@ sections:
           every numeric table column uses right or decimal alignment (algn="r").
           FAIL if any body/label box is center/right justified without cause, or any
           all-numeric table column is left/center aligned.
+      # capitalization is consistent
       - id: typography-capitalization-consistency
         weight: 3
         requirement: >-
@@ -124,6 +139,7 @@ sections:
           capitalized) OR every title is title case (major words capitalized),
           consistently. FAIL if titles mix sentence case and title case across
           slides (more than 1 outlier).
+      # if overflowing, many font families, etc. appear - punish!
       - id: typography-inconsistency-penalty
         weight: -12
         requirement: >-
@@ -173,6 +189,7 @@ sections:
   - id: content-and-ib-conventions
     title: Content And IB Conventions
     criteria:
+      # action titles
       - id: content-and-ib-conventions-action-titles
         weight: 8
         requirement: >-
@@ -182,6 +199,7 @@ sections:
           Landscape"). Heuristic: title has >= 5 words AND contains at least one
           finite verb. FAIL if any content slide title is a bare noun phrase or has
           fewer than 5 words with no verb.
+      # source footnotes
       - id: content-and-ib-conventions-source-footnotes
         weight: 7
         requirement: >-
@@ -189,6 +207,7 @@ sections:
           one text box whose content begins with or contains a source marker
           ("Source:", "Note:", or a citation). FAIL if any data-bearing slide has no
           source/note text box.
+      # page and footer
       - id: content-and-ib-conventions-page-and-footer
         weight: 4
         requirement: >-
@@ -196,6 +215,7 @@ sections:
           optional title/cover slide), and its string content increments
           monotonically. FAIL if any content slide lacks a page number or numbers
           are missing/non-monotonic.
+      # number formatting
       - id: content-and-ib-conventions-number-formatting
         weight: 5
         requirement: >-
@@ -205,6 +225,7 @@ sections:
           consistent unit symbol. FAIL if the same metric appears with different
           decimal counts, currency scale, or unit symbol across slides or within a
           table.
+      # one message per slide
       - id: content-and-ib-conventions-one-message-per-slide
         weight: 4
         requirement: >-

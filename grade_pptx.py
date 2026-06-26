@@ -1,32 +1,3 @@
-#!/usr/bin/env python3
-"""
-grade_pptx.py - Grade a PowerPoint deck against a weighted rubric.
-
-A PowerPoint isn't text, and many criteria (alignment precision, collisions,
-frame adherence, contrast) depend on geometry and pixels an LLM can't see from
-text alone. This adapter gathers three signals and judges them in ONE model call:
-  1) a structured geometry/text digest with pre-computed layout flags
-     (check_layout.extract_deck_digest), plus per-slide text via markitdown and
-     a leftover-placeholder scan (render.py),
-  2) a JPG render of every slide (render.py) attached as vision input, and
-  3) rubric's PerCriterionOneShotGrader: one call judges ALL criteria at once.
-
-The grader prompt is the markdown file `grader.md` (prose: QA posture + grading
-instructions) with two placeholders filled at runtime: {{RUBRIC}} (the criteria,
-rendered from the rubric YAML) and {{DECK_DATA}} (the digest + markitdown text).
-The result is written as a markdown report to logs/<deck>-<timestamp>.md.
-
-Usage:
-    export ANTHROPIC_API_KEY=...            # or put it in a .env file beside this script
-    python grade_pptx.py deck.pptx
-    #   --rubric PATH  rubric YAML (default: powerpoint-rubric.yaml beside this script)
-    #   --dpi N        render resolution (default 150)
-    #   --keep-images  keep rendered JPGs under --logs-dir
-
-Rendering is required: LibreOffice (soffice) + poppler (pdftoppm) must be present.
-Exit codes: 0 = graded, 2 = missing key / file / dependency / render failure.
-"""
-
 import argparse
 import asyncio
 import base64
@@ -34,38 +5,20 @@ import os
 import shutil
 import sys
 import tempfile
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-try:
-    from rubric import Rubric, OneShotOutput
-    from rubric.autograders import PerCriterionOneShotGrader
-except ImportError:
-    sys.stderr.write(
-        "Missing dependency: rubric. Install it into this venv, e.g.:\n"
-        "  ./.venv/bin/pip install rubric\n"
-        "(or `pip install -e <path-to-your-local-rubric-checkout>`)\n")
-    sys.exit(2)
-
-try:
-    import anthropic
-except ImportError:
-    sys.stderr.write("Missing dependency: anthropic. Run: pip install anthropic\n")
-    sys.exit(2)
+import anthropic
+from rubric import Rubric, OneShotOutput
+from rubric.autograders import PerCriterionOneShotGrader
 
 import check_layout  # local module (same directory)
 import render        # local module (same directory): slides->jpg + markitdown
+from dotenv import load_dotenv
 
+load_dotenv()
 
 MODEL = "claude-opus-4-8"
-MAX_TOKENS = 8192  # one response covers every criterion
-HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_GRADER_MD = os.path.join(HERE, "grader.md")
-DEFAULT_RUBRIC = os.path.join(HERE, "powerpoint-rubric.yaml")
+MAX_TOKENS = 8192 
+DEFAULT_GRADER_MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "source", "grader.md")
+DEFAULT_RUBRIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "source", "rubric.yaml")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,18 +44,18 @@ def build_deck_data(digest: dict, md_slides: list) -> str:
         f"slides: {digest['slide_count']}   "
         f"size: {digest['slide_size_in'][0]} x {digest['slide_size_in'][1]} in",
         f"frame (in): {digest['frame_in']}",
-        f"tolerances (px): {digest['tolerances_px']}",
+        f"tolerances (in): {digest['tolerances_in']}",
         "",
-        "All coordinates are in INCHES. alignment_issues are near-miss edge alignments "
-        "past pixel tolerance; frame_violations are shapes crossing the inner frame; "
-        "collisions are shape pairs whose bounding boxes intersect.",
+        "All coordinates are in INCHES. frame_violations are shapes crossing the inner "
+        "frame; collisions are shape pairs whose bounding boxes intersect. Shapes named "
+        "'background' are exempt from these checks. Judge alignment visually from the "
+        "slide images rather than from numeric edge deltas.",
         "=" * 70,
         "GEOMETRY DIGEST (per slide):",
     ]
     for s in digest["slides"]:
         f = s["flags"]
         lines.append(f"\n--- SLIDE {s['index']}  (layout: {s['layout']}) ---")
-        lines.append(f"  alignment issues: {f['alignment_issues'] or 'none'}")
         lines.append(f"  frame violations: {f['frame_violations'] or 'none'}")
         lines.append(f"  collisions: {f['collisions'] or 'none'}")
         lines.append("  shapes:")
@@ -181,6 +134,20 @@ def make_generate_fn(client, prompt_text: str, image_paths: list):
 # --------------------------------------------------------------------------- #
 # Output: write rubric's computed result as a markdown report
 # --------------------------------------------------------------------------- #
+def write_prompt_log(prompt: str, digest, logs_dir="logs") -> str:
+    """Save the exact text payload sent to the model to logs/<deck>-prompt-<ts>.md
+    and return the path. This is the deck data + rubric + grader instructions the
+    model grades on — persisted so a run's input is auditable, not discarded."""
+    from datetime import datetime
+    os.makedirs(logs_dir, exist_ok=True)
+    stem = os.path.splitext(digest["file"])[0]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(logs_dir, f"{stem}-prompt-{ts}.md")
+    with open(path, "w") as fh:
+        fh.write(prompt + "\n")
+    return path
+
+
 def write_report_md(report, digest, dpi, leftovers, logs_dir="logs") -> str:
     """Render rubric's EvaluationReport to logs/<deck>-<ts>.md and return the path."""
     from datetime import datetime
@@ -273,6 +240,8 @@ async def run(args) -> int:
         return 2
 
     prompt = build_prompt(grader_md, rubric, build_deck_data(digest, md_slides))
+    prompt_path = write_prompt_log(prompt, digest, args.logs_dir)
+    print(f"Model payload saved to {prompt_path}", file=sys.stderr)
     if args.show_digest:
         print(prompt)
         if not args.keep_images:
