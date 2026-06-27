@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
 ![Model](https://img.shields.io/badge/judge-Claude%20Opus%204.8-d97757)
 ![python-pptx](https://img.shields.io/badge/built%20with-python--pptx-0a7e07)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **A vision-led rubric grader for PowerPoint decks.** Point it at a `.pptx` and it
 renders every slide to an image, extracts the per-slide text, and computes a handful
