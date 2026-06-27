@@ -1,3 +1,4 @@
+from datetime import datetime
 import argparse
 import asyncio
 import base64
@@ -29,56 +30,37 @@ def render_rubric(rubric: Rubric) -> str:
     return "\n".join(f"[{c.weight:+g}] {c.requirement.strip()}" for c in rubric.rubric)
 
 
-def _fmt_pos(p) -> str:
-    if not p:
-        return "no-geometry"
-    return (f"L={p['left']} T={p['top']} W={p['width']} H={p['height']} "
-            f"(right={p['right']} bottom={p['bottom']})in")
+_RULE = "=" * 70
+
+_PREAMBLE = (
+    "Judge every visual criterion — overlaps, off-slide bleed, clipping, overflow, "
+    "alignment, margins — directly from the rendered slide IMAGES, which are ground "
+    "truth for what is actually visible."
+)
+_CHECKS_PREAMBLE = (
+    "PRECOMPUTED DETERMINISTIC CHECKS — these are computed directly from the .pptx "
+    "data (font names, point sizes, hex colors, text content) and are AUTHORITATIVE. "
+    "For any criterion listed here, adopt this PASS/FAIL verdict as fact rather than "
+    "re-judging it by eye:"
+)
 
 
 def build_deck_data(digest: dict, md_slides: list) -> str:
-    """The {{DECK_DATA}} block: geometry digest (with pre-computed layout flags)
-    followed by the per-slide markitdown text."""
+    """The {{DECK_DATA}} block: the precomputed deterministic checks followed by the
+    per-slide markitdown text. Visual judgments come from the slide images, so no
+    per-shape geometry is emitted."""
+    w, h = digest["slide_size_in"]
     lines = [
-        f"DECK: {digest['file']}   "
-        f"slides: {digest['slide_count']}   "
-        f"size: {digest['slide_size_in'][0]} x {digest['slide_size_in'][1]} in",
-        f"frame (in): {digest['frame_in']}",
-        f"tolerances (in): {digest['tolerances_in']}",
-        "",
-        "All coordinates are in INCHES. frame_violations are shapes crossing the inner "
-        "frame; collisions are shape pairs whose bounding boxes intersect. Shapes named "
-        "'background' are exempt from these checks. Judge alignment visually from the "
-        "slide images rather than from numeric edge deltas.",
-        "=" * 70,
-        "GEOMETRY DIGEST (per slide):",
+        f"DECK: {digest['file']}   slides: {digest['slide_count']}   size: {w} x {h} in",
+        "", _PREAMBLE,
     ]
-    for s in digest["slides"]:
-        f = s["flags"]
-        lines.append(f"\n--- SLIDE {s['index']}  (layout: {s['layout']}) ---")
-        lines.append(f"  frame violations: {f['frame_violations'] or 'none'}")
-        lines.append(f"  collisions: {f['collisions'] or 'none'}")
-        lines.append("  shapes:")
-        for sh in s["shapes"]:
-            head = f"    - {sh['name']} [{sh['kind']}"
-            if sh.get("role"):
-                head += f"/{sh['role']}"
-            head += f", {sh['source']}]"
-            if sh.get("rotation"):
-                head += f" rot={sh['rotation']}deg"
-            lines.append(head)
-            lines.append(f"        pos: {_fmt_pos(sh.get('pos_in'))}")
-            if sh.get("text"):
-                txt = sh["text"].replace("\n", " ⏎ ")
-                if len(txt) > 600:
-                    txt = txt[:600] + " […digest-truncated for brevity; NOT clipped in the deck]"
-                lines.append(f'        text: "{txt}"')
-                lines.append(f"        font: {sh.get('font_family')} {sh.get('font_size_pt')}pt "
-                             f"color={sh.get('font_color')} align={sh.get('alignment')}")
 
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("DECK TEXT PER SLIDE (markitdown extraction):")
+    cc = digest.get("computed_checks") or {}
+    if cc:
+        lines += ["", _RULE, _CHECKS_PREAMBLE]
+        lines += [f"  - [{cid}] {res['verdict']}: {res['detail']}" for cid, res in cc.items()]
+
+    lines += ["", _RULE, "DECK TEXT PER SLIDE (markitdown extraction):"]
     for i, body in enumerate(md_slides, start=1):
         lines.append(f"\n--- slide {i} text ---\n{body}" if body else f"\n--- slide {i} text --- (empty)")
     return "\n".join(lines)
@@ -108,37 +90,10 @@ def _image_blocks(image_paths: list) -> list:
     return blocks
 
 
-def make_generate_fn(client, prompt_text: str, image_paths: list):
-    """Async generate_fn matching rubric's OneShotGenerateFn: one call judges all
-    criteria. The filled grader prompt is a cached system block; the slide JPGs ride
-    on the user turn (images can't be cached)."""
-    images = _image_blocks(image_paths)
-
-    async def generate_fn(system_prompt: str, user_prompt: str, **kwargs) -> OneShotOutput:
-        system = [
-            {"type": "text", "text": system_prompt},
-            {"type": "text", "text": prompt_text, "cache_control": {"type": "ephemeral"}},
-        ]
-        resp = await client.messages.parse(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            messages=[{"role": "user", "content": images + [{"type": "text", "text": user_prompt}]}],
-            output_format=OneShotOutput,
-        )
-        return resp.parsed_output
-
-    return generate_fn
-
-
 # --------------------------------------------------------------------------- #
 # Output: write rubric's computed result as a markdown report
 # --------------------------------------------------------------------------- #
 def write_prompt_log(prompt: str, digest, logs_dir="logs") -> str:
-    """Save the exact text payload sent to the model to logs/<deck>-prompt-<ts>.md
-    and return the path. This is the deck data + rubric + grader instructions the
-    model grades on — persisted so a run's input is auditable, not discarded."""
-    from datetime import datetime
     os.makedirs(logs_dir, exist_ok=True)
     stem = os.path.splitext(digest["file"])[0]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -147,10 +102,8 @@ def write_prompt_log(prompt: str, digest, logs_dir="logs") -> str:
         fh.write(prompt + "\n")
     return path
 
-
+# make the reports readable
 def write_report_md(report, digest, dpi, leftovers, logs_dir="logs") -> str:
-    """Render rubric's EvaluationReport to logs/<deck>-<ts>.md and return the path."""
-    from datetime import datetime
     os.makedirs(logs_dir, exist_ok=True)
     stem = os.path.splitext(digest["file"])[0]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -252,7 +205,96 @@ async def run(args) -> int:
           f"{len(rubric.rubric)} criteria using {MODEL} [dpi {args.dpi}]…", file=sys.stderr)
 
     client = anthropic.AsyncAnthropic()
-    grader = PerCriterionOneShotGrader(generate_fn=make_generate_fn(client, prompt, images))
+    image_blocks = _image_blocks(images)
+    n_criteria = len(rubric.rubric)
+
+    def _alignment_problem(out: OneShotOutput) -> str:
+        """Describe any criterion_idx misalignment, or "" if the evaluations cover
+        exactly {0..n-1} once each.
+
+        The library maps each evaluation to a criterion purely by its returned
+        `criterion_idx` (per_criterion_one_shot_grader.py). When the model skips a
+        criterion or repeats/misnumbers an index, every later verdict silently shifts
+        onto the WRONG criterion and the gap becomes "Evaluation not found". We catch
+        that here — before the library maps it — so we can re-ask rather than score a
+        scrambled report."""
+        idxs = [e.criterion_idx for e in out.criteria_evaluations]
+        expected = set(range(n_criteria))
+        got = set(idxs)
+        parts = []
+        if expected - got:
+            parts.append(f"missing indices {sorted(expected - got)}")
+        if got - expected:
+            parts.append(f"out-of-range indices {sorted(got - expected)}")
+        dupes = sorted({i for i in idxs if idxs.count(i) > 1})
+        if dupes:
+            parts.append(f"duplicated indices {dupes}")
+        if len(idxs) != n_criteria:
+            parts.append(f"returned {len(idxs)} evaluations, expected {n_criteria}")
+        return "; ".join(parts)
+
+    # generate_fn for rubric's one-shot grader: one call judges every criterion.
+    async def generate_fn(system_prompt: str, user_prompt: str, **kwargs) -> OneShotOutput:
+        system = [
+            {"type": "text", "text": system_prompt},
+            {"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}},
+        ]
+        instruction = (
+            "Above are the rendered slides of the deck under evaluation. The system "
+            "block contains the full grading brief: the rubric criteria (numbered "
+            "0,1,2,…) and the deck's geometry digest and per-slide text.\n\n"
+            "GRADE THE DECK. For every criterion, decide MET or UNMET by inspecting "
+            "the slide images (ground truth) together with the geometry/text digest, "
+            "and return one evaluation per criterion using its 0-based index. Do not "
+            "treat the digest as a 'response to echo' — it is the deck's own data. "
+            f"There are exactly {n_criteria} criteria (indices 0..{n_criteria - 1}); "
+            "return exactly one evaluation for each, with criterion_idx set to that "
+            "criterion's own index, in order. Do not skip, merge, or renumber any. "
+            "You must return a verdict for every criterion; never reply that there is "
+            "nothing to evaluate."
+        )
+        fixup = ""  # appended on a re-ask after an alignment failure
+        last_err = None
+        out = None
+        for attempt in range(1, 4):  # transient overloads/timeouts shouldn't kill a run
+            try:
+                resp = await client.messages.parse(
+                    model=MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=system,
+                    messages=[{"role": "user",
+                               "content": image_blocks
+                               + [{"type": "text", "text": instruction + fixup}]}],
+                    output_format=OneShotOutput,
+                )
+                out = resp.parsed_output
+                problem = _alignment_problem(out)
+                if problem and attempt < 3:
+                    # Verdicts would attach to the wrong criteria — re-ask with the
+                    # specific defect named, rather than scoring a scrambled report.
+                    print(f"  criterion_idx misaligned ({problem}); re-asking "
+                          f"{attempt}/2…", file=sys.stderr)
+                    fixup = (
+                        f"\n\nYOUR PREVIOUS RESPONSE WAS MISALIGNED: {problem}. Each "
+                        f"criterion's verdict is matched by its criterion_idx, so a "
+                        f"wrong or missing index silently scores the wrong criterion. "
+                        f"Return exactly {n_criteria} evaluations, one per criterion, "
+                        f"each with criterion_idx equal to that criterion's index "
+                        f"(0..{n_criteria - 1}), none skipped or repeated."
+                    )
+                    continue
+                return out
+            except Exception as e:  # noqa: BLE001 - retry any API/parse failure
+                last_err = e
+                if attempt < 3:
+                    await asyncio.sleep(2 * attempt)
+                    print(f"  grading call failed ({type(e).__name__}), "
+                          f"retry {attempt}/2…", file=sys.stderr)
+        if out is not None:
+            return out  # last attempt, even if still imperfect — better than crashing
+        raise last_err
+
+    grader = PerCriterionOneShotGrader(generate_fn=generate_fn)
     report = await rubric.grade(prompt, autograder=grader)
     path = write_report_md(report, digest, args.dpi, leftovers, args.logs_dir)
     print(f"Weighted score: {report.score * 100:.1f}%  —  report saved to {path}", file=sys.stderr)

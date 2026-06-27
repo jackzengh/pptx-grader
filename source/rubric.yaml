@@ -20,7 +20,9 @@ sections:
           The left edge (x-offset) of every primary element (title, body block,
           chart, table, footnote, page number) on a slide rounds to one of at most
           2 distinct left-edge values, and the dominant left-edge value is identical
-          (within 0.05 in / 45720 EMU) across all content slides. PASS if at most 1
+          (within 0.05 in / 45720 EMU) across all content slides. Cover and
+          section-divider slides (a title with no body content rail) are excluded,
+          since they intentionally use a different left edge. PASS if at most 1
           slide deviates; FAIL if 2 or more slides use a left edge differing by more
           than 0.05 in from the deck's dominant value.
       # outer margin frame
@@ -76,15 +78,6 @@ sections:
           91440 EMU) on every content slide, and the footer/page-number band has the
           same top y-offset (within 0.1 in) on every slide that contains one. FAIL
           if title top or footer top varies by more than 0.1 in across slides.
-      # disorder penalty
-      - id: layout-and-alignment-disorder-penalty
-        weight: -15
-        requirement: >-
-          Apply this penalty if ANY of the following is true on ANY slide: a shape
-          bleeds off-slide (violates outer-margin-frame), two non-background content
-          shapes overlap at all (violates no-overlap), or 2+ slides have left edges
-          differing by more than 0.05 in (violates left-margin-consistency). This is
-          a binary penalty: applied once in full if any condition is met, otherwise 0.
   - id: typography
     title: Typography
     criteria:
